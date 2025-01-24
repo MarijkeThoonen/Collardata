@@ -22,6 +22,7 @@ library(readxl)
 library(suncalc)
 library(rstudioapi)
 library(googlesheets4)
+library(janitor)
 ```
 
 ## Set working directory
