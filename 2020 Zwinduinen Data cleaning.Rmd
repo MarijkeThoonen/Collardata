@@ -1,0 +1,197 @@
+---
+title: "2020 Zwinduinen Data cleaning"
+author: "Anouk Ollevier & Marijke Thoonen"
+date: "2024-09-19"
+output: html_document
+---
+
+## Load packages
+
+```{r packages, include=FALSE}
+library(lubridate)
+library(plyr)
+library(dplyr)
+library(tidyverse)
+library(hms)
+library(sf)
+library(stringr)
+library(RColorBrewer)
+library(plotly)
+library(ggplot2)
+library(readxl)
+library(suncalc)
+library(rstudioapi)
+library(googlesheets4)
+```
+
+## Set working directory
+
+Sets the working directory in R to the folder containing the currently active script
+
+```{r working directory}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+## Load raw data
+
+Go one folder up and navigate to 'Raw data' folder. Find all '.csv' files and combine them into one dataframe. These are all the data from 2020, in all sites.
+
+```{r load raw data}
+raw_data_path <- file.path(dirname(getwd()), "Raw data")
+csv_files <- list.files(path = raw_data_path, pattern = "\\.csv$", full.names = TRUE)
+all_data <- lapply(csv_files, read.csv, dec = ",")
+all_data <- all_data[-2]
+
+#One csv file has 16 instead of 15 columns and is loaded separatly
+extra_data <- read.csv2("../Raw data/2386_2020-06-26_2020-07-03.csv", sep = ",") %>% 
+  mutate(time_stamp = paste(time_stamp, X.1, sep = " ")) %>% #make datetime col
+  select(-X.1) %>%  #delete col X.1
+  mutate(lat = str_c(str_sub(lat, 1, 6),  # Characters before 7th
+                      str_sub(lat, 8, 10), # Characters between 8th and 10th
+                      str_sub(lat, 12)), # characters after 11th
+          lng = str_c(str_sub(lng, 1, 5),  # Characters before 6th
+                      str_sub(lng, 7, 9), # Characters between 7th and 9th
+                      str_sub(lng, 11))) %>% # characters after 10th
+select(-X)
+
+raw <- do.call(rbind, all_data) %>% 
+  select(-X)
+raw <- rbind(raw, extra_data)
+
+sum <- raw %>%
+  reframe(dis = unique(id_collar))
+```
+
+```{r}
+rm(all_data)
+rm(sum)
+rm(extra_data)
+```
+## Data cleaning
+
+### Remove duplicates
+
+Shows the number of duplicated rows and deletes duplicates.
+
+```{r duplicates}
+cat("There are currently", sum(duplicated(raw)), "duplicates\n")
+raw <- distinct(raw)
+```
+
+### Column selection
+
+Select and rename columns
+
+```{r column selection}
+inprep <- raw %>% 
+  select(
+    datetime = time_stamp,
+    id_collar = id_collar,
+    latitude = lat,
+    longitude= lng,
+    temperature = temperature
+  )
+
+inprep$latitude <- as.numeric(inprep$latitude)
+inprep$longitude <- as.numeric(inprep$longitude)
+
+inprep <- inprep %>% 
+  na.omit()
+```
+
+### Set date and time
+
+Converts the 'datetime' column to POSIXct format to ensure proper date-time handling. Extracts date, time, month and hour in separate columns.
+
+```{r date time}
+inprep$datetime <- as.POSIXct(inprep$datetime, format = "%Y-%m-%d %H:%M:%S")
+inprep$date <- format(inprep$datetime, "%Y-%m-%d")
+inprep$time <- format(inprep$datetime, "%H:%M:%S")
+inprep$month <- format(inprep$datetime, "%m")
+inprep$hour <- format(inprep$datetime, "%H")
+```
+
+Assigns day/night labels based on sunset/sunrise at location of collar.
+
+```{r day night}
+inprep$date <- as.Date(inprep$date)
+sun_times <- getSunlightTimes(data = inprep %>%  select(date, lat = latitude, lon = longitude), keep = c("sunrise", "sunset"))
+inprep <- merge(inprep, sun_times, by.x = c("date", "latitude", "longitude"), by.y = c("date", "lat", "lon"))
+inprep <- inprep %>%
+  mutate(
+    day_part = case_when(
+      time >= format(sunrise, "%H:%M:%S") & time < format(sunset, "%H:%M:%S") ~ "day",
+      TRUE ~ "night"
+    )
+  )
+inprep <- inprep %>% select(-sunrise, -sunset)
+rm(sun_times)
+```
+
+### Set coordinates
+
+```{r}
+inprep <- st_as_sf(inprep, coords = c("longitude", "latitude"), crs = 4326)
+# Transforming the CRS from WGS84 to Lambert 72
+inprep <- st_transform(inprep, crs = 31370)
+```
+
+### Remove NA
+
+```{r}
+inprep <- na.omit(inprep)
+```
+
+### Selection of collar period
+
+To only keep data when the animals were in the field. This is based on **file Bart**. Can we alternatively do this based on coordinates?
+
+```{r}
+```
+
+### Selection based on coordinates
+
+Remove all observations outside of the grazing area Zwinduinen?
+
+```{r}
+
+```
+
+## Save cleaned and processed data frame as csv - automated based on script title
+
+Extract year and location from the script name assuming the format is "YYYY Location Data cleaning.Rmd". Save as .csv in "Processed data" folder.
+
+```{r}
+script_name <- basename(rstudioapi::getActiveDocumentContext()$path)
+parts <- strsplit(gsub(".Rmd$", "", script_name), " ")[[1]]
+year <- parts[1]
+location <- sub(" Data.*$", "", sub(paste0("^", year, " "), "", script_name))
+output_file_path <- file.path(dirname(getwd()), "Processed data", paste0(year, "_", location, "_processed_data.csv"))
+write.csv(as.data.frame(st_drop_geometry(inprep)), file = output_file_path, row.names = TRUE)
+cat("Data frame saved to:", output_file_path, "\n")
+```
+
+## Save cleaned and processed data frame as geopackage
+
+Save as shapefile
+
+```{r}
+shapefile_output_file_path <- file.path(dirname(getwd()), "Processed data", paste0(year, "_", location, "_processed_data.shp"))
+st_write(inprep, dsn = shapefile_output_file_path, layer = "collardata", driver = "ESRI Shapefile", append = FALSE)
+cat("Spatial data frame saved to:", shapefile_output_file_path, "\n")
+
+```
+
+## Collar information
+
+**Collar number - collar type - additional information**
+
+```{r}
+print(paste(location, year, "contains the following collars:", paste(unique(inprep$id_collar), collapse = ", ")))
+```
+
+## Clean environment
+
+```{r}
+rm(list = ls())
+```
