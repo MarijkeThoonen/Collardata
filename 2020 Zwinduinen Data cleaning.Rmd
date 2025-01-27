@@ -9,19 +9,16 @@ output: html_document
 
 ```{r packages, include=FALSE}
 library(lubridate)
-library(plyr)
 library(dplyr)
 library(tidyverse)
-library(hms)
 library(sf)
 library(stringr)
 library(RColorBrewer)
-library(plotly)
 library(ggplot2)
 library(readxl)
 library(suncalc)
 library(rstudioapi)
-library(googlesheets4)
+library(janitor)
 library(janitor)
 ```
 
@@ -35,15 +32,16 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 
 ## Load raw data
 
-Go one folder up and navigate to 'Raw data' folder. Find all '.csv' files and combine them into one dataframe. These are all the data from 2020, in all sites.
+Go one folder up and navigate to 'Raw data' folder. Find all '.csv' files.
 
 ```{r load raw data}
 raw_data_path <- file.path(dirname(getwd()), "Raw data")
 csv_files <- list.files(path = raw_data_path, pattern = "\\.csv$", full.names = TRUE)
 all_data <- lapply(csv_files, read.csv, dec = ",")
-all_data <- all_data[-2]
 
-#One csv file has 16 instead of 15 columns and is loaded separatly
+all_data <- all_data[-2] #second .csv has 16 columns
+
+#One csv file has 16 instead of 15 columns and is loaded separately
 extra_data <- read.csv2("../Raw data/2386_2020-06-26_2020-07-03.csv", sep = ",") %>% 
   mutate(time_stamp = paste(time_stamp, X.1, sep = " ")) %>% #make datetime col
   select(-X.1) %>%  #delete col X.1
@@ -68,6 +66,17 @@ rm(all_data)
 rm(sum)
 rm(extra_data)
 ```
+## Get year and location
+
+Extract year and location from the script name assuming the format is "YYYY Location Data cleaning.Rmd".
+
+```{r year and location}
+script_name <- basename(rstudioapi::getActiveDocumentContext()$path)
+parts <- strsplit(gsub(".Rmd$", "", script_name), " ")[[1]]
+year <- parts[1]
+location <- sub(" Data.*$", "", sub(paste0("^", year, " "), "", script_name))
+```
+
 ## Data cleaning
 
 ### Remove duplicates
@@ -117,7 +126,10 @@ Assigns day/night labels based on sunset/sunrise at location of collar.
 ```{r day night}
 inprep$date <- as.Date(inprep$date)
 sun_times <- getSunlightTimes(data = inprep %>%  select(date, lat = latitude, lon = longitude), keep = c("sunrise", "sunset"))
+
 inprep <- merge(inprep, sun_times, by.x = c("date", "latitude", "longitude"), by.y = c("date", "lat", "lon"))
+inprep <- distinct(inprep)
+
 inprep <- inprep %>%
   mutate(
     day_part = case_when(
@@ -125,6 +137,7 @@ inprep <- inprep %>%
       TRUE ~ "night"
     )
   )
+
 inprep <- inprep %>% select(-sunrise, -sunset)
 rm(sun_times)
 ```
@@ -139,23 +152,47 @@ inprep <- st_transform(inprep, crs = 31370)
 
 ### Remove NA
 
+In columns lng and lat there can be zeros and negative values after transformation.
+
 ```{r}
 inprep <- na.omit(inprep)
 ```
 
-### Selection of collar period
+### Selection observations within the study area
 
-To only keep data when the animals were in the field. This is based on **file Bart**. Can we alternatively do this based on coordinates?
+Load raster buffered shapefiles
 
 ```{r}
+#Go 4 folders up and set file path of the shapefile data
+shapefile_directory <- normalizePath(file.path("..", "..", "..", "..", "R scripts PB07_Begrazing_Collars", "Vlaanderen - over studie gebieden heen", "2023", "Processed data"))
+buffered_rasters <- st_read(file.path(shapefile_directory, "2023_Vlaanderen_40m_buffered_rasters.shp"))
+print(buffered_rasters)
 ```
 
-### Selection based on coordinates
+==> NOG FILTEREN OP ENKEL DE POLYGON VAN HET SPECIFIEKE ONDERZOEKSGEBIED
+==> Hiervoor titel (location) en Proces_Geb afstemmen op elkaar. 
+```{r}
+# Keep points that intersect with any buffered polygons
+#indices <- st_within(inprep$geometry, buffered_rasters$geometry %>% filter(Proces_Geb == "Westhoek"))
+# Filter points based on whether they are within any of the polygons
+#points_within_polygons <- inprep[lengths(indices) > 0, ]
+#rm(indices)
 
-Remove all observations outside of the grazing area Zwinduinen?
+selected_polygon <- buffered_rasters %>% 
+  filter(Proces_Geb == location)  # Dit geeft een subset van het sf-object
+points_within_polygon <- inprep[st_within(inprep, selected_polygon, sparse = FALSE), ]
+```
+
+Visualize point and polygons
 
 ```{r}
-
+ggplot() +
+  geom_sf(data = buffered_rasters %>% filter(Proces_Geb == location), fill = "lightblue", color = "black") +  # Polygons
+  geom_sf(data = points_within_polygon, color = "red", size = 0.1) +      # Points
+  labs(title = paste0("Visualization of points within ", location),
+       x = "Longitude",
+       y = "Latitude") +
+  theme_minimal() 
 ```
 
 ## Save cleaned and processed data frame as csv - automated based on script title
